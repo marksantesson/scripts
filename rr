@@ -1,5 +1,6 @@
+#!/usr/bin/env python3
 
-#Copyright 2012,2014 Mark Santesson
+#Copyright 2012,2014,2024 Mark Santesson
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -27,6 +28,16 @@ import os
 import glob
 import operator
 import optparse
+import subprocess
+
+import color
+from color import red,green
+
+
+if hasattr(__builtins__, 'WindowsError'):
+    io_error = WindowsError
+else:
+    io_error = OSError
 
 
 def globAndMaybeRecurse(globs):
@@ -39,27 +50,69 @@ def globAndMaybeRecurse(globs):
 
     return ret
 
+def get_file_modification_time(filename):
+    attempts_left = 5
+    t = None
+    while attempts_left and t == None:
+        try:
+            t = os.stat(filename)[ stat.ST_MTIME ]
+        except io_error as e:
+            time.sleep(0.1)
+            attempts_left -= 1
+    return t
+
+def load_files_from_github():
+    cp = subprocess.run(['git', 'status'], capture_output=True)
+    lines = cp.stdout.decode().split('\n')
+    lines = [ x for x in lines if x.startswith('\tmodified:   ') ]
+    lines = [ x.split(':', 1)[1].strip() for x in lines ]
+    return lines
+
 
 if __name__ == "__main__":
 
     parser = optparse.OptionParser (
                         usage = '%prog -c <command> files ...',
                         description = 'Repeatedly run a command whenever any one of a list of files changes.')
+    parser.add_option( '-w', '--wait', dest='wait', action='store_true'
+                     , default=False
+                     , help='Wait for a change before executing for the'
+                            ' first time.')
     parser.add_option( '-c', '--command', dest='command', type="string"
                      , help='Specify command to run when a change is detected')
     parser.add_option( '-r', '--recurse', dest='recurse', action='store_true'
                      , default=False, help='Apply glob to subdirectories, too.')
-    options, args = parser.parse_args()
+    parser.add_option( '-s', '--sleep', dest='sleep', type="float", default=0.0
+                     , help='Specify number of seconds to sleep after detecting a file change.')
+    parser.add_option( '', '--color', dest='color', action='store_true', default=None
+                     , help='Turn on color. Default is to auto-detect.')
+    parser.add_option( '', '--nocolor', dest='color', action='store_false', default=None
+                     , help='Turn off color. Default is to auto-detect.')
+    parser.add_option( '-g', '--github', dest='github', action='store_true', default=False
+                     , help='Monitor files that show up as modified with "git status"')
+    options,args = parser.parse_args()
 
-
-    if not args:
-        print '\n' + os.path.basename( sys.argv[0] ) + ' requires some files to monitor.'
-        sys.exit(1)
+    if options.color != None:
+        color.USE_COLORS = options.color
 
     if not options.command:
-        print '\nError: A command to run is required.'
+        first_with_space = ([x for x in args if ' ' in x] + [None])[0]
+        if first_with_space is not None:
+            args.remove(first_with_space)
+            options.command = first_with_space
+        else:
+            print(red('\nError: A command to run is required.'))
+            sys.exit(1)
+
+    if options.github:
+        args += load_files_from_github()
+
+    if not args:
+        print('\n' + red(os.path.basename( sys.argv[0] )) + ' requires some files to monitor.')
         sys.exit(1)
 
+
+    print(f'Monitoring files: {args}')
 
     file_times = dict()
     globbed = sum( [ glob.glob(x) for x in args ], [] )
@@ -71,35 +124,34 @@ if __name__ == "__main__":
     for x in globbed:
         file_times[x] = 0.0
 
-    while True:
-        rerun = False
+    try:
+        while True:
+            rerun = False
 
-        for f in file_times.keys():
-            attempts_left = 5
-            t = None
-            while attempts_left and t == None:
-                try:
-                    t = os.stat(f)[ stat.ST_MTIME ]
-                except WindowsError, e:
-                    time.sleep(0.1)
-                    attempts_left -= 1
+            for f in file_times.keys():
+                t = get_file_modification_time(f)
+                if t is not None and  t > file_times[f]:
+                    if not rerun and options.sleep > 0.0:
+                        time.sleep(options.sleep)
+                        t = get_file_modification_time(f)
 
-            if t > file_times[f]:
-                rerun = True
-                file_times[f] = t
+                    rerun = True
+                    file_times[f] = t
 
-        if rerun:
-            print time.strftime('\n\n--- Rerunning at %H:%M:%S :') + repr(options.command)
-            ret = os.system( options.command )
+            if rerun:
+                print(green(time.strftime('\n\n--- Rerunning at %H:%M:%S :') + repr(options.command)))
+                ret = os.system( options.command )
 
-            if ret:
-                print '\n\n--- ERRORED %r' % (ret,) + time.strftime(' at %H:%M:%S.')
+                if ret:
+                    print(red('\n\n--- ERRORED %r' % (ret,) + time.strftime(' at %H:%M:%S.')))
+
+                else:
+                    print(green(time.strftime('\n\n--- Done at %H:%M:%S.')))
 
             else:
-                print time.strftime('\n\n--- Done at %H:%M:%S.')
-
-        else:
-            time.sleep(0.5)
+                time.sleep(0.5)
+    except KeyboardInterrupt:
+        print('Caught KeyboardInterrupt... exiting.')
 
 else:
     raise Exception( 'This module is not meant to be imported.' )
